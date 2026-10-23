@@ -122,6 +122,7 @@ dig +short "$(hostname -f)" A
 **Resultado esperado:** el FQDN es el que tienes asignado y el registro DNS `A` devuelve la IP pública del servidor. Si aparecen varias direcciones, revisa que esté la asignada.
 
 ## Paso 4. Instalar Certbot y comprobar el certificado HTTPS
+## Paso 4. Instalar Certbot y comprobar el certificado HTTPS
 
 Instala EPEL y Certbot:
 
@@ -130,15 +131,15 @@ dnf install -y epel-release
 dnf install -y certbot
 ```
 
-Comprueba si tu servidor **ya cuenta** con un certificado de Let's Encrypt:
+Comprueba si el servidor ya cuenta con un certificado de Let's Encrypt:
 
 ```bash
 certbot certificates
 ```
 
-Si encuentras un certificado **vigente** que incluya tu FQDN, úsalo y pasa al paso 5. No solicites otro innecesariamente.
+Si existe un certificado vigente que incluya tu FQDN, utilízalo. No solicites otro innecesariamente.
 
-Si **no tienes** un certificado para tu FQDN, realiza lo siguiente:
+Si no existe un certificado para tu FQDN:
 
 1. Comprueba que el FQDN resuelve a tu IP pública:
 
@@ -146,7 +147,9 @@ Si **no tienes** un certificado para tu FQDN, realiza lo siguiente:
 dig +short "$(hostname -f)" A
 ```
 
-2. Obtén el certificado usando el método `standalone`. Como Apache suele ocupar el puerto 80, detén Apache durante la solicitud y vuelve a iniciarlo después:
+2. Obtén el certificado mediante el método `standalone`.
+
+Este procedimiento interrumpe temporalmente Apache y requiere que Let's Encrypt pueda acceder al puerto TCP 80 del servidor.
 
 ```bash
 systemctl stop httpd
@@ -154,9 +157,7 @@ certbot certonly --standalone -d "$(hostname -f)"
 systemctl start httpd
 ```
 
-Durante la ejecución, Certbot puede solicitar tu correo electrónico y la aceptación de sus condiciones.
-
-> Ejecuta `systemctl start httpd` **aunque Certbot falle**. El método `standalone` necesita disponer temporalmente del puerto 80. No detengas Webmin ni Virtualmin.
+**Importante:** ejecuta `systemctl start httpd` incluso si Certbot falla. No detengas Webmin ni Virtualmin.
 
 3. Verifica el resultado:
 
@@ -165,36 +166,130 @@ certbot certificates
 systemctl is-active httpd
 ```
 
-Los certificados obtenidos con Certbot se encuentran normalmente en:
+Los certificados se encuentran normalmente en:
 
 ```text
 /etc/letsencrypt/live/TU_FQDN/fullchain.pem
 /etc/letsencrypt/live/TU_FQDN/privkey.pem
 ```
 
-Usa el **Certificate Name** mostrado por `certbot certificates` para identificar el directorio real; puede no coincidir exactamente con el FQDN.
+Utiliza el **Certificate Name** mostrado por Certbot para identificar el directorio real.
 
-## Paso 5. Asignar el certificado a Webmin
+## Paso 5a. Asignar el certificado a Virtualmin y Apache
 
-1. Ingresa en `https://TU_FQDN:10000`.
-2. Abre **Webmin → Webmin Configuration → SSL Encryption**.
-3. Localiza la configuración de los archivos SSL del servidor Webmin (los nombres exactos pueden variar según la versión).
-4. Establece los archivos del certificado ya obtenido:
+Virtualmin administra los certificados de los servidores virtuales y sus correspondientes VirtualHosts de Apache.
 
-   - **Private key file:** `/etc/letsencrypt/live/TU_FQDN/privkey.pem`
-   - **Certificate file:** selecciona **Separate file** y utiliza `/etc/letsencrypt/live/TU_FQDN/fullchain.pem`.
+Para instalar el certificado existente de Let's Encrypt, ejecuta:
 
-   Sustituye `TU_FQDN` por el nombre del directorio de certificado **real** que comprobaste en el paso anterior.
+```bash
+virtualmin install-cert \
+  --domain "$(hostname -f)" \
+  --cert "/etc/letsencrypt/live/TU_FQDN/fullchain.pem" \
+  --key "/etc/letsencrypt/live/TU_FQDN/privkey.pem"
+```
 
-5. Guarda la configuración y vuelve a abrir:
+Sustituye `TU_FQDN` por el directorio real identificado con `certbot certificates`. El nombre utilizado en `--domain` debe corresponder al servidor virtual configurado en Virtualmin.
+
+Este comando:
+
+- Importa el certificado firmado por Let's Encrypt.
+- Importa su clave privada correspondiente.
+- Actualiza los archivos administrados por Virtualmin.
+- Integra el certificado con la configuración del servidor virtual.
+
+**Verifica Apache:**
+
+```bash
+apachectl configtest
+```
+
+Si el resultado es `Syntax OK`, ejecuta:
+
+```bash
+systemctl reload httpd
+```
+
+**Comprueba el certificado utilizado por Apache:**
+
+```bash
+echo | openssl s_client \
+  -connect 127.0.0.1:443 \
+  -servername "$(hostname -f)" \
+  2>/dev/null | openssl x509 \
+  -noout -subject -issuer -dates
+```
+
+El emisor debe corresponder a Let's Encrypt.
+
+Comprueba también la cadena de confianza:
+
+```bash
+openssl s_client \
+  -connect 127.0.0.1:443 \
+  -servername "$(hostname -f)" \
+  -verify_return_error </dev/null 2>&1 | \
+  grep -E 'Verify return code|Verification error|depth='
+```
+
+El resultado esperado es:
+
+```text
+Verify return code: 0 (ok)
+```
+
+Finalmente, comprueba el acceso:
+
+```text
+https://TU_FQDN/
+```
+
+> **Nota:** es normal que Virtualmin siga mostrando certificados almacenados en `/etc/ssl/virtualmin/`. Virtualmin mantiene sus propios archivos y no necesita conservar las rutas originales de Certbot.
+
+## Paso 5b. Asignar el certificado a Webmin
+
+Webmin utiliza su propio servicio HTTPS, normalmente en el puerto 10000, independiente de Apache.
+
+1. Ingresa en:
 
 ```text
 https://TU_FQDN:10000
 ```
 
-**Comprobación:** el navegador muestra un certificado válido para tu FQDN. Si Webmin ya estaba configurado con un certificado válido, conserva esa configuración.
+2. Abre **Webmin → Webmin Configuration → SSL Encryption**.
 
-> Acceder por `https://TU_IP_PUBLICA:10000` puede producir una advertencia de nombre de certificado: el certificado emitido para tu FQDN no necesariamente cubre la IP.
+3. Localiza la configuración de los archivos SSL del servidor Webmin.
+
+4. Establece los siguientes archivos:
+
+   - **Private key file:** `/etc/letsencrypt/live/TU_FQDN/privkey.pem`
+   - **Certificate file:** selecciona **Separate file** y utiliza `/etc/letsencrypt/live/TU_FQDN/fullchain.pem`.
+
+5. Guarda la configuración y comprueba nuevamente el acceso:
+
+```text
+https://TU_FQDN:10000
+```
+
+**Comprobación:** el navegador debe mostrar un certificado válido para el FQDN.
+
+Si Webmin ya utiliza correctamente un certificado válido, conserva su configuración.
+
+> Acceder mediante `https://TU_IP_PUBLICA:10000` puede provocar una advertencia, porque un certificado emitido para un FQDN no necesariamente incluye la dirección IP.
+
+## Consideración importante: renovación automática
+
+Certbot y Virtualmin tienen mecanismos de administración y renovación de certificados independientes.
+
+El comando `virtualmin install-cert` importa el certificado existente, pero no garantiza que las copias administradas por Virtualmin se actualicen cuando Certbot renueve el certificado original.
+
+Por lo tanto, antes de utilizar esta configuración de forma permanente, se debe establecer una estrategia de renovación:
+
+- **Alternativa recomendada:** permitir que Virtualmin gestione la emisión y renovación del certificado desde **Setup SSL Certificate → SSL Providers**, evitando administraciones independientes.
+- **Alternativa con Certbot:** conservar Certbot como responsable de la renovación y configurar un *deploy hook* que vuelva a ejecutar `virtualmin install-cert` después de cada renovación exitosa. También debe comprobarse la recarga de los servicios correspondientes.
+
+No es necesario solicitar un certificado nuevo para realizar la instalación inicial descrita anteriormente.
+
+
 
 ## Paso 6. Revisar Apache y deshabilitar el listado de directorios
 
@@ -468,3 +563,5 @@ Verifica que puedes acceder a Webmin y Virtualmin.
 Tu servidor individual está preparado para los laboratorios de Keycloak. Continuarás trabajando con tu usuario personal y utilizarás Docker y Docker Compose para desplegar los servicios del curso.
 
 **Fin del Laboratorio 00.**
+
+
